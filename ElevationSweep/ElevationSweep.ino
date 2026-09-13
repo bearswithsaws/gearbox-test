@@ -88,13 +88,15 @@ struct Cal {
   // is how anything long-running gets started: closing a serial session
   // resets this board, so a test begun over serial dies with the session.
   //   0 = nothing, 1 = oscillate, 2 = level then staged sweep,
-  //   3 = wave horizon to horizon, speeding up each tier
+  //   3 = wave horizon to horizon speeding up each tier,
+  //   4 = search for the top-speed ceiling
   int bootAction = 0;
   float oscAmp = 20.0f;
   float sweepTo = 180.0f;
   float sweepStep = 15.0f;
   float waveSpeed = 30.0f;
   int waveCycles = 2;
+  float ceilStart = 60.0f;
 } cal;
 
 bool rawStream = false;
@@ -159,6 +161,7 @@ void loadCal() {
   cal.sweepStep = prefs.getFloat("swStep", 15.0f);
   cal.waveSpeed = prefs.getFloat("wvSpd", 30.0f);
   cal.waveCycles = prefs.getInt("wvCyc", 2);
+  cal.ceilStart = prefs.getFloat("ceilSt", 60.0f);
   prefs.end();
 
   if (PRESET_UP_IS_POSITIVE >= 0 && !cal.upKnown) {
@@ -183,6 +186,7 @@ void saveCal() {
   prefs.putFloat("swStep", cal.sweepStep);
   prefs.putFloat("wvSpd", cal.waveSpeed);
   prefs.putInt("wvCyc", cal.waveCycles);
+  prefs.putFloat("ceilSt", cal.ceilStart);
   prefs.end();
 }
 
@@ -321,6 +325,7 @@ void printHelp() {
       "  S <deg>  staged sweep 0 -> deg -> 0 now, logging enc vs imu\n"
       "  W <deg>  level then staged sweep on the NEXT boot (default 180)\n"
       "  V <d/s>  wave horizon to horizon on the NEXT boot, speeding up\n"
+      "  C <d/s>  find the top-speed ceiling on the NEXT boot, from <d/s> up\n"
       "  P        print the last staged sweep's readings\n"
       "  k / K    refit the IMU hinge axis from the last sweep: report / store\n"
       "  g <deg>  go to angle (0 = horizon, 90 = zenith, 180 = far horizon)\n"
@@ -577,6 +582,60 @@ bool runWave(float toDeg, int cycles, float speed) {
   return true;
 }
 
+// Walk the top speed up in 10 deg/s steps until the axis loses sync, and
+// report the highest that completed a clean round trip. One number per run,
+// so successive belt tensions or a round of grub screws can be compared
+// against each other instead of against an anecdote.
+//
+// Acceleration is set to the speed but capped at 100 deg/s^2, which was
+// measured clean at 40 deg/s, so this isolates top speed rather than
+// confounding it with acceleration. A tier whose ramp would not fit in half
+// the travel is skipped: the axis would never reach that speed, and timing it
+// would say nothing.
+bool runCeiling(float startSpeed) {
+  float best = NAN;
+  logf("ceiling search from %.0f deg/s, 10 deg/s steps, over %.0f deg of travel",
+       startSpeed, cal.sweepTo);
+  for (float s = startSpeed; s <= 130.0f; s += 10.0f) {
+    const float a = fminf(s, 100.0f);
+    if (s * s / (2.0f * a) > fabsf(cal.sweepTo) * 0.5f) {
+      logf("  %.0f deg/s is unreachable in %.0f deg at accel %.0f - stopping here",
+           s, cal.sweepTo, a);
+      break;
+    }
+    el.setSpeedLimits(s, a);
+    bool ok = true;
+    for (int leg = 0; leg < 2 && ok; leg++) {
+      const float t = (leg == 0) ? cal.sweepTo : 0.0f;
+      const uint32_t t0 = millis();
+      if (!el.moveTo(t) || !waitAxis(120000)) {
+        ok = false;
+        break;
+      }
+      const uint32_t dt = millis() - t0;
+      const uint32_t s0 = millis();
+      while (millis() - s0 < 500) { service(); delay(5); }
+      logf("  %5.0f deg/s (accel %3.0f) -> %5.0f  %5.2fs  enc %7.2f", s, a, t,
+           dt / 1000.0f, el.positionDeg());
+    }
+    if (!ok) {
+      logf("  LOST SYNC at %.0f deg/s, %.2f deg in: %s", s, el.positionDeg(),
+           el.fault() ? el.faultReason() : "timed out or stopped");
+      break;
+    }
+    best = s;
+  }
+  el.clearFault();
+  el.setSpeedLimits(MAX_SPEED_DEG_S, ACCEL_DEG_S2);
+  if (el.moveTo(0)) waitAxis(120000);
+  if (isnan(best))
+    logf("CEILING: nothing clean, even %.0f deg/s failed", startSpeed);
+  else
+    logf("CEILING: highest clean round trip %.0f deg/s (%lu encoder read errors)", best,
+         (unsigned long)el.sensor().errorCount());
+  return true;
+}
+
 void runFirstBootSequence() {
   bool ok = true;
   if (!cal.valid) ok = runDiscovery();
@@ -754,6 +813,14 @@ void handleCommand(const String &line) {
            "%.0f deg/s.",
            cal.sweepTo, cal.waveCycles, cal.waveSpeed, cal.waveSpeed * 1.5f,
            cal.waveSpeed * 2.0f);
+      break;
+    }
+    case 'C': {
+      cal.ceilStart = (arg != 0) ? fabsf(arg) : 60.0f;
+      cal.bootAction = 4;
+      saveCal();
+      logf("will search for the speed ceiling from %.0f deg/s on the next boot.",
+           cal.ceilStart);
       break;
     }
     case 'W': {
@@ -948,6 +1015,13 @@ void setup() {
       logf("wave finished. %lu encoder read errors total.",
            (unsigned long)el.sensor().errorCount());
       setPhase(Phase::Idle, "idle after wave");
+    } else if (action == 4) {
+      logf("\n*** CEILING SEARCH from %.0f deg/s. No USB session needed. ***\n"
+           "Press RESET or cut power to stop it.", cal.ceilStart);
+      setPhase(Phase::Idle, "ceiling search");
+      if (el.moveTo(0)) waitAxis(120000);
+      runCeiling(cal.ceilStart);
+      setPhase(Phase::Idle, "idle after ceiling search");
     }
   } else if (!el.sensorPresent()) {
     setPhase(Phase::Idle, "no encoder");

@@ -14,6 +14,7 @@ the output shaft and an **ICM-20948** IMU on the arm. This build plays the
 | [talk.ps1](talk.ps1) | Send a scripted sequence of serial commands and print the replies. |
 | [runsweep.ps1](runsweep.ps1) | Staged horizon-to-horizon sweep, recording both sensors at every station. |
 | [runwave.ps1](runwave.ps1) | Continuous horizon-to-horizon wave at three increasing speeds. |
+| [runceiling.ps1](runceiling.ps1) | Walk the speed up until the axis loses sync; reports the highest clean speed. |
 
 ## Hardware
 
@@ -379,6 +380,30 @@ at the very worst for a fast overhead pass, so the 40 °/s default is already
 four times over and the acceleration is deliberately gentle for carrying
 hardware rather than because the axis cannot do more.
 
+### Belt tension is not the speed lever
+
+`runceiling.ps1` walks the speed up in 10 °/s steps and reports the highest
+clean round trip, which turns each attempt into one comparable number. Across
+three tensions:
+
+| Belt tension | Highest clean | Where it broke |
+|---|---|---|
+| As built | 70 °/s | 85 °/s, 84° into the leg |
+| Tightened | — | 85 °/s, 44° in |
+| Backed off again | 70 °/s | 80 °/s, 45° in |
+
+Tension moved the failure point around without ever raising the ceiling, and
+over-tightening made it clearly worse. **70 °/s is the number for this axis**,
+and it is set by motor torque at speed, not by the belt.
+
+The clinching argument is the acceleration test: 100 °/s² at 40 °/s ran clean,
+and that demands more torque than 80 °/s² does, so a failure at 80 °/s cannot
+be an acceleration-torque event. Every failure lands at or just after the
+moment the axis reaches its top speed.
+
+Re-run this after tightening the internal gear grub screws, or after changing
+the current pot, and compare the single number.
+
 **A skipped belt costs nothing here but time.** After the 85 °/s trip the
 encoder read 84.09° and the IMU agreed at 84.52°, so position was never in
 doubt. That is the payoff for putting an absolute encoder on the output shaft
@@ -465,6 +490,7 @@ w        quick sweep           S <deg>  staged sweep now, logging enc vs imu
 o <deg>  oscillate until 'x'   O <deg>  oscillate on the NEXT boot
 W <deg>  level + staged sweep on the NEXT boot
 V <d/s>  wave horizon to horizon on the NEXT boot, speeding up each tier
+C <d/s>  find the top-speed ceiling on the NEXT boot, walking up from <d/s>
 t        hand test: driver off, turn the arm by hand, watch enc vs imu
 m <n>    open-loop move of n microsteps, no encoder, no limits
 c        re-run discovery      u        flip 'up'
