@@ -344,12 +344,40 @@ every tier reaches full speed in one second:
 | 45 °/s | clean, within 0.01 s |
 | 60 °/s | clean, within 0.05 s |
 | 70 °/s | clean, within 0.06 s |
-| 85 °/s | **belt skipped teeth** 84° into the first leg |
-| 105 °/s | **belt skipped teeth** 44° in |
+| 85 °/s | **lost sync** 84° into the first leg |
+| 105 °/s | **lost sync** 44° in |
+| 85 °/s, belt tightened | **lost sync earlier**, 44° in |
+| 40 °/s with 100 °/s² | clean, both legs |
 
 Matching the predicted time that closely means the motor is tracking its pulse
-train exactly, with nothing lost. The ceiling is **belt tension, not motor
-torque**: it is clearly audible when it goes, and the tensioner is the fix.
+train exactly, with nothing lost.
+
+**The ceiling is top speed, near 85–95 °/s at the output. It is not the
+acceleration and it is not the belt.** Three pieces of evidence:
+
+- Every failure happened at the moment the axis reached roughly 86–97 °/s,
+  whatever the acceleration used to get there.
+- Running 40 °/s with a very snappy 100 °/s² completed cleanly, so
+  acceleration four times the default is fine on its own.
+- **Tightening the belt made it worse,** failing at 44° where it had
+  previously managed 84°. Added preload costs torque and buys grip that was
+  not the problem, so back tension off rather than up.
+
+It sounds like belt trouble when it goes, because a stepper losing sync
+buzzes harshly and the belt transmits it. That noise is not diagnostic.
+
+What this actually is: a stepper's torque falls with speed as back-EMF eats
+into the supply headroom, and 85 °/s at the output is 227 rpm at the motor,
+which is where a 2 A NEMA17 on 12 V at roughly half current starts running
+out. The levers, in order of effort: **turn the current pot up** (the motor is
+rated 2 A and is set near 1 A), then **raise the supply voltage** (the TMC2209
+accepts up to 29 V, and 24 V roughly doubles the speed at which torque falls
+away).
+
+None of which is needed. Satellite passes want a few degrees per second, ten
+at the very worst for a fast overhead pass, so the 40 °/s default is already
+four times over and the acceleration is deliberately gentle for carrying
+hardware rather than because the axis cannot do more.
 
 **A skipped belt costs nothing here but time.** After the 85 °/s trip the
 encoder read 84.09° and the IMU agreed at 84.52°, so position was never in
@@ -358,10 +386,19 @@ instead of counting steps from a home switch: there is no accumulated position
 to lose, and no re-homing to do. The stall guard noticed, stopped, cut the
 driver, and the arm held where it was.
 
-One caveat on reading the logs: the IMU is briefly meaningless during a hard
-stop, because an accelerometer cannot tell gravity from deceleration. The
-raw-stream line printed at the moment of the trip showed a wild value; the
-settled reading a second later agreed with the encoder to 0.4°.
+### The IMU is a static reference, not a dynamic one
+
+An accelerometer cannot separate gravity from the acceleration of the thing it
+is bolted to, so the arm angle it reports is only meaningful once the axis has
+settled. During the 40 °/s, 100 °/s² run the IMU column wandered 25° away from
+the encoder mid-slew, and gravity magnitude read 10.27 m/s² rather than 9.8.
+A second after stopping it agreed with the encoder to within a degree.
+
+This is a design constraint for the tracker, not a defect. **Consult the IMU
+when an axis is stationary or creeping, never to close a loop while slewing.**
+The encoder handles the dynamics; the IMU is the independent opinion that
+catches lost steps and a slipped belt once the axis is parked. The firmware's
+own `imu.stationary()` flag is the gate for that.
 
 Defaults in [config.h](ElevationSweep/config.h) are now 40 °/s and 25 °/s²,
 which is a comfortable margin under the bare-arm ceiling. Expect that ceiling
