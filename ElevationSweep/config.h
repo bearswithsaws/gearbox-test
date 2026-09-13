@@ -51,9 +51,16 @@ constexpr int MICROSTEPS = 16;            // TMC2209 MS1=MS2=HIGH (open = 1/8, w
 // once per mount with the 'E' serial command, which stores it in flash.
 
 // ---- Motion limits at the output shaft ----
-// 0 to 15 deg/s takes ~1.9 s and ~14 deg of travel at each end of a move.
-constexpr float MAX_SPEED_DEG_S = 15.0f;
-constexpr float ACCEL_DEG_S2 = 8.0f;
+// MEASURED 2026-09-13 with a bare arm: clean at 70 deg/s with a matching
+// 70 deg/s^2, and the belt skips teeth at 85. The ceiling is belt tension,
+// not motor torque - it is audible when it goes, and it costs nothing but
+// time because the encoder is absolute and after the reduction.
+//
+// 40 / 25 leaves a comfortable margin below that. Expect the ceiling to drop
+// once there is an antenna on the arm, so re-run `runwave.ps1 -Speed 70`
+// after adding load (or after tightening the belt) before raising these.
+constexpr float MAX_SPEED_DEG_S = 40.0f;
+constexpr float ACCEL_DEG_S2 = 25.0f;
 constexpr float SOFT_MIN_DEG = -5.0f;     // a little past each horizon
 constexpr float SOFT_MAX_DEG = 185.0f;
 

@@ -11,6 +11,9 @@ the output shaft and an **ICM-20948** IMU on the arm. This build plays the
 | [GearboxAxis/](GearboxAxis/) | The library. `AS5048A` (SPI encoder), `ArmIMU` (arm angle from gravity), `GearboxAxis` (ramped closed-loop axis). Junctioned into `Documents\Arduino\libraries` so the IDE sees it. |
 | [ElevationSweep/](ElevationSweep/) | The sketch: bring-up, self-calibration, level, sweep, serial console. Pins in [config.h](ElevationSweep/config.h). |
 | [build.ps1](build.ps1) | Compile / upload / monitor from a terminal using the arduino-cli bundled with Arduino IDE. |
+| [talk.ps1](talk.ps1) | Send a scripted sequence of serial commands and print the replies. |
+| [runsweep.ps1](runsweep.ps1) | Staged horizon-to-horizon sweep, recording both sensors at every station. |
+| [runwave.ps1](runwave.ps1) | Continuous horizon-to-horizon wave at three increasing speeds. |
 
 ## Hardware
 
@@ -191,7 +194,8 @@ Two scripts wrap all of that:
 ```powershell
 .\talk.ps1 -Script "s|1500"              # send commands, print replies, leave it running
 .\talk.ps1 -Script "r|300|m 800|8000"    # numbers are waits in ms
-.\runsweep.ps1 -To 180                   # arm the boot sweep, reboot into it, watch
+.\runsweep.ps1 -To 180                   # staged sweep: arm it, reboot into it, watch
+.\runwave.ps1 -Speed 30                  # wave horizon to horizon at 30/45/60 deg/s
 ```
 
 The consequence for firmware design is that **anything long-running must be
@@ -329,6 +333,41 @@ The encoder is the position truth here and it is very good. The IMU's ~0.55°
 RMS is ample for what the IMU is for: an independent second opinion that
 catches lost steps and a slipped belt.
 
+### Speed headroom, bare arm
+
+Full horizon-to-horizon legs, acceleration set equal to speed throughout, so
+every tier reaches full speed in one second:
+
+| Speed | Result |
+|---|---|
+| 30 °/s | clean, every leg within 0.11 s of the theoretical trapezoid time |
+| 45 °/s | clean, within 0.01 s |
+| 60 °/s | clean, within 0.05 s |
+| 70 °/s | clean, within 0.06 s |
+| 85 °/s | **belt skipped teeth** 84° into the first leg |
+| 105 °/s | **belt skipped teeth** 44° in |
+
+Matching the predicted time that closely means the motor is tracking its pulse
+train exactly, with nothing lost. The ceiling is **belt tension, not motor
+torque**: it is clearly audible when it goes, and the tensioner is the fix.
+
+**A skipped belt costs nothing here but time.** After the 85 °/s trip the
+encoder read 84.09° and the IMU agreed at 84.52°, so position was never in
+doubt. That is the payoff for putting an absolute encoder on the output shaft
+instead of counting steps from a home switch: there is no accumulated position
+to lose, and no re-homing to do. The stall guard noticed, stopped, cut the
+driver, and the arm held where it was.
+
+One caveat on reading the logs: the IMU is briefly meaningless during a hard
+stop, because an accelerometer cannot tell gravity from deceleration. The
+raw-stream line printed at the moment of the trip showed a wild value; the
+settled reading a second later agreed with the encoder to 0.4°.
+
+Defaults in [config.h](ElevationSweep/config.h) are now 40 °/s and 25 °/s²,
+which is a comfortable margin under the bare-arm ceiling. Expect that ceiling
+to fall once an antenna is on the arm. Re-measure with
+`.\runwave.ps1 -Speed 70` after adding load or tightening the belt.
+
 **With the driver disabled the arm held at 20° instead of sagging**, so the
 16:1 reduction is not easily backdriven. That matters for carrying a dish.
 
@@ -388,6 +427,7 @@ B        run the whole bring-up
 w        quick sweep           S <deg>  staged sweep now, logging enc vs imu
 o <deg>  oscillate until 'x'   O <deg>  oscillate on the NEXT boot
 W <deg>  level + staged sweep on the NEXT boot
+V <d/s>  wave horizon to horizon on the NEXT boot, speeding up each tier
 t        hand test: driver off, turn the arm by hand, watch enc vs imu
 m <n>    open-loop move of n microsteps, no encoder, no limits
 c        re-run discovery      u        flip 'up'

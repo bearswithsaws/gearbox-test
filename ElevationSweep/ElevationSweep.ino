@@ -87,11 +87,14 @@ struct Cal {
   // One-shot action to run on the NEXT boot, which then clears itself. This
   // is how anything long-running gets started: closing a serial session
   // resets this board, so a test begun over serial dies with the session.
-  //   0 = nothing, 1 = oscillate, 2 = level then staged sweep
+  //   0 = nothing, 1 = oscillate, 2 = level then staged sweep,
+  //   3 = wave horizon to horizon, speeding up each tier
   int bootAction = 0;
   float oscAmp = 20.0f;
   float sweepTo = 180.0f;
   float sweepStep = 15.0f;
+  float waveSpeed = 30.0f;
+  int waveCycles = 2;
 } cal;
 
 bool rawStream = false;
@@ -154,6 +157,8 @@ void loadCal() {
   cal.oscAmp = prefs.getFloat("oscAmp", 20.0f);
   cal.sweepTo = prefs.getFloat("swTo", 180.0f);
   cal.sweepStep = prefs.getFloat("swStep", 15.0f);
+  cal.waveSpeed = prefs.getFloat("wvSpd", 30.0f);
+  cal.waveCycles = prefs.getInt("wvCyc", 2);
   prefs.end();
 
   if (PRESET_UP_IS_POSITIVE >= 0 && !cal.upKnown) {
@@ -176,6 +181,8 @@ void saveCal() {
   prefs.putFloat("oscAmp", cal.oscAmp);
   prefs.putFloat("swTo", cal.sweepTo);
   prefs.putFloat("swStep", cal.sweepStep);
+  prefs.putFloat("wvSpd", cal.waveSpeed);
+  prefs.putInt("wvCyc", cal.waveCycles);
   prefs.end();
 }
 
@@ -313,6 +320,7 @@ void printHelp() {
       "  O <deg>  oscillate on the NEXT boot, with nothing plugged in\n"
       "  S <deg>  staged sweep 0 -> deg -> 0 now, logging enc vs imu\n"
       "  W <deg>  level then staged sweep on the NEXT boot (default 180)\n"
+      "  V <d/s>  wave horizon to horizon on the NEXT boot, speeding up\n"
       "  P        print the last staged sweep's readings\n"
       "  k / K    refit the IMU hinge axis from the last sweep: report / store\n"
       "  g <deg>  go to angle (0 = horizon, 90 = zenith, 180 = far horizon)\n"
@@ -531,6 +539,44 @@ bool runStagedSweep(float toDeg, float stepDeg) {
   return true;
 }
 
+// Continuous horizon to horizon at a chosen speed, closed loop the whole way
+// so the stall guard stays armed. Acceleration is set equal to the speed,
+// which means "reach full speed in one second" at any speed, so the ramp
+// stays proportionate instead of becoming a jerk at the top end.
+//
+// Reports each leg's wall time against the theoretical time for a trapezoid
+// profile. A leg that takes materially longer than predicted means the motor
+// is not keeping up with the pulse train it is being given.
+bool runWave(float toDeg, int cycles, float speed) {
+  const float accel = speed;
+  el.setSpeedLimits(speed, accel);
+  float ramp = speed / accel;                       // seconds to full speed
+  float rampDeg = 0.5f * accel * ramp * ramp;
+  float predicted = (2.0f * rampDeg >= fabsf(toDeg))
+                        ? 2.0f * sqrtf(fabsf(toDeg) / accel)          // triangular
+                        : 2.0f * ramp + (fabsf(toDeg) - 2.0f * rampDeg) / speed;
+  logf("wave: %d cycles 0 <-> %.0f at %.0f deg/s, %.0f deg/s^2 (predict %.2fs per leg)",
+       cycles, toDeg, speed, accel, predicted);
+  for (int c = 0; c < cycles; c++) {
+    for (int leg = 0; leg < 2; leg++) {
+      float t = (leg == 0) ? toDeg : 0.0f;
+      uint32_t t0 = millis();
+      if (!el.moveTo(t)) { logf("  refused at %.0f deg", t); return false; }
+      if (!waitAxis(120000)) {
+        logf("  ABORTED heading for %.0f: %s", t,
+             el.fault() ? el.faultReason() : "timed out or stopped");
+        return false;
+      }
+      uint32_t dt = millis() - t0;
+      uint32_t s0 = millis();
+      while (millis() - s0 < 700) { service(); delay(5); }   // settle the IMU
+      logf("  cycle %d -> %5.0f  %5.2fs (%+.2f vs predicted)  enc %7.2f  imu %7.2f", c + 1,
+           t, dt / 1000.0f, dt / 1000.0f - predicted, el.positionDeg(), imu.armAngleDeg());
+    }
+  }
+  return true;
+}
+
 void runFirstBootSequence() {
   bool ok = true;
   if (!cal.valid) ok = runDiscovery();
@@ -698,6 +744,16 @@ void handleCommand(const String &line) {
       }
       saveCal();
       logf("  adopted and stored. rms %.3f -> %.3f deg", before, after);
+      break;
+    }
+    case 'V': {
+      cal.waveSpeed = (arg != 0) ? fabsf(arg) : 30.0f;
+      cal.bootAction = 3;
+      saveCal();
+      logf("will wave 0 <-> %.0f on the next boot: %d cycles at each of %.0f, %.0f and "
+           "%.0f deg/s.",
+           cal.sweepTo, cal.waveCycles, cal.waveSpeed, cal.waveSpeed * 1.5f,
+           cal.waveSpeed * 2.0f);
       break;
     }
     case 'W': {
@@ -877,6 +933,21 @@ void setup() {
         runStagedSweep(cal.sweepTo, cal.sweepStep);
       }
       setPhase(Phase::Idle, "idle after boot sweep");
+    } else if (action == 3) {
+      logf("\n*** WAVE: horizon to horizon, getting faster each tier. ***\n"
+           "No USB session needed. Press RESET or cut power to stop it.");
+      setPhase(Phase::Idle, "wave");
+      if (el.moveTo(0)) waitAxis(120000);
+      for (int tier = 0; tier < 3 && !el.fault(); tier++) {
+        if (!runWave(cal.sweepTo, cal.waveCycles, cal.waveSpeed * (1.0f + 0.5f * tier)))
+          break;
+      }
+      // Leave the axis on the gentle defaults, parked level.
+      el.setSpeedLimits(MAX_SPEED_DEG_S, ACCEL_DEG_S2);
+      if (!el.fault() && el.moveTo(0)) waitAxis(120000);
+      logf("wave finished. %lu encoder read errors total.",
+           (unsigned long)el.sensor().errorCount());
+      setPhase(Phase::Idle, "idle after wave");
     }
   } else if (!el.sensorPresent()) {
     setPhase(Phase::Idle, "no encoder");
