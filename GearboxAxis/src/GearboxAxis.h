@@ -101,6 +101,13 @@ class GearboxAxis {
 
   void update();
 
+  // How many correction moves the last moveTo() needed after its ramp
+  // finished. Zero means the open-loop ramp landed inside
+  // settleToleranceDeg on its own, which is the signature of a move the
+  // motor tracked without losing anything. Non-zero on a fast move means
+  // steps were lost and the encoder had to recover them.
+  int settleTries() const { return settleTries_; }
+
   bool fault() const { return fault_; }
   const char *faultReason() const { return faultReason_; }
   void clearFault();

@@ -592,10 +592,19 @@ bool runWave(float toDeg, int cycles, float speed) {
 // confounding it with acceleration. A tier whose ramp would not fit in half
 // the travel is skipped: the axis would never reach that speed, and timing it
 // would say nothing.
+// Time a ramped move of `dist` degrees should take at this speed and accel.
+static float predictedLegSeconds(float dist, float speed, float accel) {
+  const float rampDeg = speed * speed / (2.0f * accel);
+  if (2.0f * rampDeg >= dist) return 2.0f * sqrtf(dist / accel);   // triangular
+  return 2.0f * (speed / accel) + (dist - 2.0f * rampDeg) / speed;
+}
+
 bool runCeiling(float startSpeed) {
-  float best = NAN;
+  float bestClean = NAN, bestCompleted = NAN;
   logf("ceiling search from %.0f deg/s, 10 deg/s steps, over %.0f deg of travel",
        startSpeed, cal.sweepTo);
+  logf("  CLEAN = the ramp landed on target unaided. LOSSY = it completed only");
+  logf("  because the encoder loop recovered lost steps afterwards.");
   for (float s = startSpeed; s <= 130.0f; s += 10.0f) {
     const float a = fminf(s, 100.0f);
     if (s * s / (2.0f * a) > fabsf(cal.sweepTo) * 0.5f) {
@@ -603,8 +612,9 @@ bool runCeiling(float startSpeed) {
            s, cal.sweepTo, a);
       break;
     }
+    const float predict = predictedLegSeconds(fabsf(cal.sweepTo), s, a);
     el.setSpeedLimits(s, a);
-    bool ok = true;
+    bool ok = true, clean = true;
     for (int leg = 0; leg < 2 && ok; leg++) {
       const float t = (leg == 0) ? cal.sweepTo : 0.0f;
       const uint32_t t0 = millis();
@@ -612,27 +622,41 @@ bool runCeiling(float startSpeed) {
         ok = false;
         break;
       }
-      const uint32_t dt = millis() - t0;
+      const float dt = (millis() - t0) / 1000.0f;
+      const int tries = el.settleTries();
       const uint32_t s0 = millis();
       while (millis() - s0 < 500) { service(); delay(5); }
-      logf("  %5.0f deg/s (accel %3.0f) -> %5.0f  %5.2fs  enc %7.2f", s, a, t,
-           dt / 1000.0f, el.positionDeg());
+      // Judge on time, not on the fixup count. A single fixup costing 0.08s is
+      // the encoder landing a fraction outside the 0.1 deg settle tolerance,
+      // which is normal. Lost steps cost real time to wind back, because the
+      // recovery move has its own ramp.
+      const float slack = fmaxf(0.20f, 0.05f * predict);
+      const bool legClean = (dt - predict <= slack);
+      if (!legClean) clean = false;
+      logf("  %5.0f deg/s (accel %3.0f) -> %5.0f  %5.2fs (%+.2f vs %.2f predicted)  "
+           "%d fixups  enc %7.2f  %s",
+           s, a, t, dt, dt - predict, predict, tries, el.positionDeg(),
+           legClean ? "CLEAN" : "LOSSY");
     }
     if (!ok) {
       logf("  LOST SYNC at %.0f deg/s, %.2f deg in: %s", s, el.positionDeg(),
            el.fault() ? el.faultReason() : "timed out or stopped");
       break;
     }
-    best = s;
+    bestCompleted = s;
+    if (clean) bestClean = s;
   }
   el.clearFault();
   el.setSpeedLimits(MAX_SPEED_DEG_S, ACCEL_DEG_S2);
   if (el.moveTo(0)) waitAxis(120000);
-  if (isnan(best))
-    logf("CEILING: nothing clean, even %.0f deg/s failed", startSpeed);
-  else
-    logf("CEILING: highest clean round trip %.0f deg/s (%lu encoder read errors)", best,
-         (unsigned long)el.sensor().errorCount());
+  if (isnan(bestCompleted)) {
+    logf("CEILING: nothing completed, even %.0f deg/s failed", startSpeed);
+  } else {
+    logf("CEILING: highest CLEAN %.0f deg/s, highest completed-with-recovery %.0f deg/s "
+         "(%lu encoder read errors)",
+         bestClean, bestCompleted, (unsigned long)el.sensor().errorCount());
+    logf("  Use the CLEAN figure. Set the working limit well under it.");
+  }
   return true;
 }
 

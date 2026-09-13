@@ -382,27 +382,49 @@ hardware rather than because the axis cannot do more.
 
 ### Belt tension is not the speed lever
 
-`runceiling.ps1` walks the speed up in 10 °/s steps and reports the highest
-clean round trip, which turns each attempt into one comparable number. Across
-three tensions:
+`runceiling.ps1` walks the speed up in 10 °/s steps and reports one comparable
+number per run, so mechanical tweaks can be judged against each other.
 
-| Belt tension | Highest clean | Where it broke |
+It distinguishes three outcomes, and the distinction matters more than it
+sounds. **"Completed" is not "tracked."** A closed-loop move that loses steps
+still arrives, because the encoder notices and the axis winds it back. The tell
+is time: the recovery move has its own ramp, so a lossy leg takes materially
+longer than a trapezoid profile says it should.
+
+| Outcome | Meaning |
+|---|---|
+| CLEAN | the ramp landed on target unaided, within 0.2 s of theoretical |
+| LOSSY | it arrived only because the encoder recovered lost steps |
+| LOST SYNC | disagreement passed the 12° guard, driver cut |
+
+Judging on elapsed time rather than on the correction count matters too: a
+single fixup costing 0.08 s is just the encoder landing a hair outside the
+0.1° settle tolerance, which is normal at any speed.
+
+Measured at this axis's best tension, reproducible over two consecutive runs:
+
+| Speed | Timing vs theoretical | Verdict |
 |---|---|---|
-| As built | 70 °/s | 85 °/s, 84° into the leg |
-| Tightened | — | 85 °/s, 44° in |
-| Backed off again | 70 °/s | 80 °/s, 45° in |
+| 50 °/s | −0.01 s | CLEAN |
+| 60 °/s | +0.05 s | CLEAN |
+| 70 °/s | +0.00 s | CLEAN |
+| 80 °/s | +0.37 to +0.46 s | LOSSY |
+| 90 °/s | lost sync 46° in | — |
 
-Tension moved the failure point around without ever raising the ceiling, and
-over-tightening made it clearly worse. **70 °/s is the number for this axis**,
-and it is set by motor torque at speed, not by the belt.
+Across four belt tensions the CLEAN figure was **70 °/s every single time.**
+Tension only changed how gracefully it degraded above that: over-tightened, it
+lost sync at 85 only 44° into the leg; at the loosest setting, 80 °/s merely
+went lossy and it took 90 °/s to trip. So tension is worth setting for
+smoothness and bearing life, and is worth nothing for speed.
 
-The clinching argument is the acceleration test: 100 °/s² at 40 °/s ran clean,
-and that demands more torque than 80 °/s² does, so a failure at 80 °/s cannot
-be an acceleration-torque event. Every failure lands at or just after the
-moment the axis reaches its top speed.
+The clinching argument that this is torque-at-speed and not acceleration:
+100 °/s² at 40 °/s ran clean, and that demands more torque than 80 °/s² does,
+so a failure at 80 °/s cannot be an acceleration-torque event. Every failure
+lands as the axis reaches its top speed.
 
-Re-run this after tightening the internal gear grub screws, or after changing
-the current pot, and compare the single number.
+Re-run this after tightening the internal gear grub screws, or after moving the
+current pot, and compare the CLEAN number. The default 40 °/s sits at 1.75×
+margin under it.
 
 **A skipped belt costs nothing here but time.** After the 85 °/s trip the
 encoder read 84.09° and the IMU agreed at 84.52°, so position was never in
